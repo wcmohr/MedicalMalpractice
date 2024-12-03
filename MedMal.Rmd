@@ -5,29 +5,39 @@ date: "2024-11-12"
 output: pdf_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
-
-## R Markdown
-
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
 ```{r import_data, echo=FALSE}
 library(haven)
+library(dplyr)
+
 data = read_por("./NPDB2404.POR")
 summary(data)
 print(head(data[complete.cases(data$PAYMENT),],3))
 ```
 
-## Including Plots
+```{r}
+data %>% count(RECTYPE) %>% dplyr::arrange(desc(n))
 
-You can also embed plots, for example:
+data$REC_PMT = ifelse()
+help(ifelse)
+```
+There are around 500k payments, with the rest being adverse actions
+```{r}
+data %>% count(REPTYPE) %>% dplyr::arrange(desc(n))
+```
+302 - State Licensure or Certification Action (Indiv, CAAR, 11/22/99 and later) is the most common report type.
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+Payments under type 101 and 102 are still substantial and there is considerable opportunity to model payments.
+
+Grouping by broader categories of report type (licensure, professional society, etc.)
+may yield useful insights, though the breakdown by RECTYPE with new and old combined may be the best route.
+
+```{r}
+orig_yr_cts = data %>% count(ORIGYEAR) %>% dplyr::arrange(desc(n))
+
+plot(x=orig_yr_cts$ORIGYEAR, y=orig_yr_cts$n)
+```
+
+```{r}
 ```
 
 Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
