@@ -3,41 +3,223 @@ title: "LinReg_Project"
 author: "Will Mohr"
 date: "2024-11-12"
 output: pdf_document
+editor_options: 
+  markdown: 
+    wrap: 72
 ---
 
-```{r import_data, echo=FALSE}
+```{r LoadPackages}
+library(tidyverse)
+library(ggplot2)
 library(haven)
 library(dplyr)
+library(fastDummies)
+library(car)
+```
 
+General Notes This database is intended from the perspective of the
+practitioner. Unclear how separate records may refer to a single case.
+
+The dataset may be better suited to inference than prediction, since all
+variables are associated with the outcome, and we don't have records for
+non-events.
+
+to-do: get correlations by state
+
+```{r focus_problem}
+# focusing modelling efforts on predicting the total for payments.
+reg_data = data[!is.na(data$PAYMENT) & data$PAYMENT > 0, ]
+
+```
+
+# CPI AVERAGING
+
+```{r CPI_Averaging}
+cpi_data = read_csv(file = "CPI_Urban_Avg_90_24.csv")
+end_cpi = as.numeric(cpi_data[cpi_data$Year==2024, "Oct"])
+
+# verify coherence between arithmetic avg and official avg
+cpi_data$first_half = rowMeans(cpi_data[, c("Jan","Feb","Mar","Apr","May","Jun")])
+cpi_data$second_half = rowMeans(cpi_data[, c("Jul","Aug","Sep","Oct","Nov","Dec")])
+mean(abs(cpi_data$HALF1 - cpi_data$first_half))
+mean(abs(cpi_data$HALF2[-35] - cpi_data$second_half[-35]))
+max(abs(cpi_data$HALF1 - cpi_data$first_half))
+max(abs(cpi_data$HALF2[-35] - cpi_data$second_half[-35]))
+# avg diff of ~.01, max diff of ~ .05
+
+cpi_data$HALF2 - cpi_data[,"second_half"]
+
+# my calculations for first and second half are within 5 cents of the CPI provided 
+# semiannual figures, verifying that an arithmetic average is an acceptable 
+# determination of the midpoint for trending purposes.
+cpi_data
+# Get relevant averages over months with data in each year
+cpi_avg_1990 = rowMeans(cpi_data[cpi_data$Year == 1990, 
+                                 c("Sep","Oct","Nov","Dec")])
+cpi_avg_2024 = rowMeans(cpi_data[cpi_data$Year == 2024, c("Jan","Feb","Mar",
+                "Apr","May","Jun","Jul","Aug","Sep","Oct")])
+cpi_avg_1991_2023 = rowMeans(cpi_data[(cpi_data$Year != 2024) & 
+                                         (cpi_data$Year != 1990),
+                                       c("Jan","Feb","Mar",
+                "Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")])
+CPI_YEARLY = data.frame(YEAR = seq(1990,2024,1), CPI =  c(cpi_avg_1990, cpi_avg_1991_2023, cpi_avg_2024))
+CPI_YEARLY$TREND_FACTOR = apply(
+  CPI_YEARLY, MARGIN = 1, FUN=function (x){end_cpi/x[2]
+})
+rownames(CPI_YEARLY) = CPI_YEARLY$YEAR
+trend_payment = function(x){
+  CPI_YEARLY[as.character(x[1]), "TREND_FACTOR"]*x[2]
+}
+CPI_YEARLY[as.character(1991), "TREND_FACTOR"]*x[2]
+
+# VAR: PAYMENT_TRENDED
+reg_data$PAYMENT_TRENDED = apply(reg_data[c("ORIGYEAR","PAYMENT")],
+                             MARGIN = 1, FUN = trend_payment)
+```
+
+```{r Box_Cox_Transform}
+reg_data$PAYMENT_CPI_LOG = log(reg_data$PAYMENT_TRENDED)
+reg_data$PAYMENT_CPI_SQRT = sqrt(reg_data$PAYMENT_TRENDED)
+reg_data$PAYMENT_CPI_SXTHRT = reg_data$PAYMENT_TRENDED^(1/6)
+```
+
+```{r Transformed_Distributions}
+reg_data %>% ggplot(aes(x=PAYMENT_TRENDED, fill = RECTYPE)) + 
+  geom_histogram(position = "identity",alpha=.5, bins = 50) + scale_fill_manual(values = c("M" = "blue","P" = "red")) 
+# a log transformation may be appropriate
+
+reg_data %>% ggplot(aes(x=PAYMENT_CPI_LOG, fill = RECTYPE)) + 
+  geom_histogram(position = "identity",alpha=.5, bins = 50) + scale_fill_manual(values = c("M" = "blue","P" = "red")) 
+
+reg_data %>% ggplot(aes(x=PAYMENT_CPI_SQRT, fill = RECTYPE)) + 
+  geom_histogram(position = "identity", alpha=.5, bins = 50) + scale_fill_manual(values = c("M" = "blue","P" = "red"))
+reg_data %>% ggplot(aes(x=PAYMENT_CPI_SXTHRT, fill = RECTYPE)) + 
+  geom_histogram(position = "identity", alpha=.5, bins = 50) + scale_fill_manual(values = c("M" = "blue","P" = "red"))
+```
+
+A Log box-cox transform may not be quite optimal based on the
+distributions above. Sixth root looks more normal, if less
+interpretable. We also see that record type "M" and type "P" payment
+distributions are similar.
+
+```{r REPTYPE}
+reg_data %>% group_by(REPTYPE) %>% summarise(mean = mean(PAYMENT))
+```
+
+```{r ORIGYEAR}
+cor(reg_data %>% group_by(ORIGYEAR) %>% summarise(mean = mean(PAYMENT_TRENDED)) %>% arrange(desc(mean)))
+# there is a positive correlation between year and mean trended payment
+
+pairs(reg_data[c("ORIGYEAR","PAYMENT_TRENDED")])
+
+
+?pairs
+```
+
+```{r feature_engineering}
+# VAR: PAYMENT_TRENDED
+
+reg_vars = c("PAYMENT_TRENDED")
+
+# VAR: WORKSTATE
+reg_data[reg_data$LICNSTAT == "" & reg_data$HOMESTAT == "" & reg_data$WORKSTAT == "", ]
+reg_data[reg_data$WORKSTAT == "", "WORKSTAT"] = reg_data[reg_data$WORKSTAT == "","HOMESTAT"]
+reg_data[reg_data$WORKSTAT== "", "WORKSTAT"] = reg_data[reg_data$WORKSTAT == "","LICNSTAT"]
+reg_data = reg_data[reg_data$WORKSTAT != "", ]
+reg_vars = c(reg_vars,"WORKSTAT")
+
+# VAR: LICNFELD
+licnfeld_df = as.data.frame(reg_data %>% group_by(LICNFELD) %>% summarise(
+n = n(), mean = mean(PAYMENT_TRENDED)) %>% arrange(desc(n)))
+licnfeld_df$LICNFELD = as.character(licnfeld_df$LICNFELD)
+misc_licnfeld = licnfeld_df[licnfeld_df$n < 1000,"LICNFELD"]
+reg_data[reg_data$LICNFELD %in% misc_licnfeld, "LICNFELD"] = 99999
+reg_data$LICNFELD = as.factor(reg_data$LICNFELD)
+reg_vars = c(unique(reg_vars), "LICNFELD")
+
+# VAR: PRACTAGE
+reg_data$PRACTAGE = as.numeric(reg_data$PRACTAGE) + 5
+reg_data = reg_data[!reg_data$PRACTAGE  %in% c(NA,15), ]
+reg_vars = c(unique(reg_vars),"PRACTAGE")
+
+# VAR: GRAD
+misc_GRAD = as.numeric((reg_data %>% group_by(GRAD) %>% summarise(n=n()) %>% filter(n<1000))[["GRAD"]])
+reg_data$GRAD = as.numeric(reg_data[["GRAD"]])
+reg_data = reg_data[!reg_data$GRAD %in% misc_GRAD,]
+reg_vars = c(unique(reg_vars),"GRAD")
+
+# VAR: ALGNNATR
+# All ALGNNATR categories have n>1000, so no consolidation needed
+# reg_data %>% group_by(ALGNNATR) %>% summarise(n=n()) %>% arrange(desc(n))
+
+reg_data$ALGNNATR = as.factor(reg_data$ALGNNATR)
+reg_vars = c(unique(reg_vars), "ALGNNATR")
+
+# VARS: ALEGATN1 & ALEGATN2
+reg_data$ALEGATN1 = as.integer(reg_data[["ALEGATN1"]])
+all_ALEGATN1 = data.frame(reg_data %>% group_by(ALEGATN1) %>% summarise(n=n()) %>% arrange(desc(n)))
+misc_ALEGATN = as.integer(all_ALEGATN1[all_ALEGATN1$n <= 1000, "ALEGATN1"])
+reg_data[reg_data$ALEGATN1 %in% misc_ALEGATN,]$ALEGATN1 = 9999
+reg_data$ALEGATN2 = as.integer(reg_data[["ALEGATN2"]])
+# Assign '0' to records with no 2nd allegation
+reg_data[is.na(reg_data$ALEGATN2),"ALEGATN2"] = 0
+reg_data[reg_data$ALEGATN2 %in% misc_ALEGATN,]$ALEGATN2 = 9999
+reg_data$ALEGATN2 = as.factor(reg_data$ALEGATN2)
+reg_data$ALEGATN1 = as.factor(reg_data$ALEGATN1)
+
+reg_vars = c(unique(reg_vars),"ALEGATN2")
+reg_vars = c(unique(reg_vars),"ALEGATN1")
+
+# VAR: DEV_YEARS
+reg_data$DEV_YEARS = reg_data$ORIGYEAR - reg_data$MALYEAR1
+reg_data$DEV_YEARS = as.numeric(reg_data$DEV_YEARS)
+reg_vars = c(unique(reg_vars),"DEV_YEARS")
+reg_vars = c(unique(reg_vars),"MALYEAR1")
+
+# PAYNUMBR may incur data "leakage"
+
+# VAR: PTGENDER
+reg_data %>% group_by(PTGENDER) %>% summarise(mean(PAYMENT), n=n())
+reg_data[reg_data$PTGENDER == "", "PTGENDER"] = "NA"
+reg_vars = c(unique(reg_vars), "PTGENDER")
+
+# VAR: PTTYPE
+reg_data %>% group_by(PTTYPE) %>% summarise(mean(PAYMENT), n=n())
+reg_data[reg_data$PTTYPE == "" ,"PTTYPE"] = "NA"
+reg_vars = c(unique(reg_vars), "PTTYPE")
+
+# VAR: OUTCOME
+# Make NA outcomes their own factor
+reg_data[is.na(reg_data$OUTCOME), "OUTCOME"] = 11
+reg_data$OUTCOME = as.factor(reg_data$OUTCOME)
+reg_vars = c(unique(reg_vars),"OUTCOME")
+
+# VAR: PTAGE 
+# Patient Age is missing in half the records
+sum(is.na(reg_data$PTAGE))
+```
+
+```{r formulate_problem}
+reg_vars = unique(c(reg_vars, "PAYMENT_TRENDED"))
+reg_data[, reg_vars]
+reg_data[, reg_vars]
+vars_matrix = fastDummies::dummy_cols(reg_data[, reg_vars])
+numeric_cols = vars_matrix %>% select(where(is.double))
+reg_data %>% group_by(ALEGATN1) %>% summarise(n=n())
+
+scatterplotMatrix(numeric_cols[seq(1,dim(numeric_cols)[1],100),])
+```
+```{r first_model}
+attach(vars_matrix)
+lm(data = vars_matrix, PAYMENT_TRENDED ~ .)
+```
+
+
+```{r import_data, echo=FALSE}
+# keep at bottom so doesn't re-run every time
 data = read_por("./NPDB2404.POR")
-summary(data)
-print(head(data[complete.cases(data$PAYMENT),],3))
+
 ```
 
-```{r}
-data %>% count(RECTYPE) %>% dplyr::arrange(desc(n))
 
-data$REC_PMT = ifelse()
-help(ifelse)
-```
-There are around 500k payments, with the rest being adverse actions
-```{r}
-data %>% count(REPTYPE) %>% dplyr::arrange(desc(n))
-```
-302 - State Licensure or Certification Action (Indiv, CAAR, 11/22/99 and later) is the most common report type.
 
-Payments under type 101 and 102 are still substantial and there is considerable opportunity to model payments.
-
-Grouping by broader categories of report type (licensure, professional society, etc.)
-may yield useful insights, though the breakdown by RECTYPE with new and old combined may be the best route.
-
-```{r}
-orig_yr_cts = data %>% count(ORIGYEAR) %>% dplyr::arrange(desc(n))
-
-plot(x=orig_yr_cts$ORIGYEAR, y=orig_yr_cts$n)
-```
-
-```{r}
-```
-
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

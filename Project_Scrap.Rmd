@@ -1,0 +1,119 @@
+---
+title: "MedMal_WIP_SCRAP"
+author: "Will"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Mostly Regression Related
+```{r SumPaymentsByYear}
+total_payments = data %>% group_by(ORIGYEAR) %>% summarise_at(vars(PAYMENT), funs(sum(.,na.rm = TRUE)))
+ggplot(data = total_payments, mapping = aes(ORIGYEAR, PAYMENT)) + geom_line()
+```
+
+
+# Mostly TS related
+```{r PRACTNUM}
+num_records = data %>% group_by(PAYMENT_DUMMY, PRACTNUM) %>% count(PRACTNUM) %>% arrange(desc(n))
+length(num_records$PAYMENT_DUMMY)
+summary(data["PRACTNUM"])
+# 918,569 unique practitioners are in the dataset.
+```
+
+```{r Remove_Rows_RECTYPE_M_No_Pmts}
+# remove "payment" rows with no payments 
+licn_field_stats = data %>% filter(PAYMENT_DUMMY == 1) %>% group_by(PAYMENT_DUMMY, LICNFELD) %>% summarise(paid = sum(PAYMENT))
+
+# licn_field_stats -- some are NA -- clear out these records
+data[which(is.na(data[data$RECTYPE %in% c("M", "P"), "PAYMENT"])),]
+erroneous_rcds = data[data$RECTYPE %in% c("M","P"),][which(is.na(data[data$RECTYPE %in% c("M","P"), "PAYMENT"])),]$SEQNO
+data_trimmed = data_trimmed[which(data_trimmed$SEQNO %in% erroneous_rcds == FALSE), ]
+
+# Narrow the column set
+ts_columns = c("ORIGYEAR", "PRACTNUM", "PAYMENT_DUMMY", "PAYMENT")
+ts_data = data_trimmed[, ts_columns]
+
+get_lag = function(x, data, lag){
+  origyear = x[1]
+  practnum = x[2]
+  payment_dummy = x[3]
+  payment = x[4]
+    # take matrix, return # lagged entries
+  lagged_year = origyear - lag
+  dim(data[(data$PRACTNUM == practnum) & 
+         (data$ORIGYEAR == lagged_year), "PAYMENT_DUMMY"])[1]
+}
+
+ts_data_agg = ts_data %>% group_by(PRACTNUM, ORIGYEAR) %>% summarize(num_pmts = sum(PAYMENT_DUMMY), num_rcds = n(), adverse_actions = num_rcds-num_pmts)
+ts_wide = (ts_data_agg %>% pivot_wider(names_from = ORIGYEAR, values_from = c(num_pmts, adverse_actions)))
+ts_wide = as.data.frame(ts_wide) %>% select(!c("PRACTNUM", "num_rcds"))
+
+aa_ts = ts_wide %>% select(starts_with("adverse_actions"))
+pmts_ts = ts_wide %>% select(starts_with("num_pmts"))
+
+# set colnames
+names(pmts_ts) = substr(names(pmts_ts), nchar(names(pmts_ts)) - 3, nchar(names(pmts_ts)))
+names(aa_ts) = substr(names(aa_ts), nchar(names(aa_ts)) - 3, nchar(names(aa_ts)))
+
+
+
+# fill NA
+aa_ts[is.na(aa_ts)] = 0
+pmts_ts[is.na(pmts_ts)] = 0
+# order cols by year
+aa_ts = aa_ts[, order(names(aa_ts))]
+pmts_ts = pmts_ts[, order(names(pmts_ts))]
+```
+
+```{r Graphics_of_data}
+library(ggplot2)
+
+# make data into dataframe
+
+yearly_pmt_counts = colSums(pmts_ts)
+  
+data.frame(year = names())
+ggplot()
+colSums(pmts_ts)
+colSums(aa_ts)
+library(reshape2)
+
+records = melt(data.frame(year = names(colSums(pmts_ts)), num_payments = colSums(pmts_ts), num_aa = colSums(aa_ts)), id='year', value.name = "Counts", variable.name = "Type")
+
+records = rename(records, Year=year)
+ggplot(data = records, mapping = aes(x= as.numeric(Year), y = Counts, colour = Type)) + geom_point() + ggtitle(label = "Record Counts by Type", subtitle = "A Visualization of Trends") + scale_color_manual(values = c("num_payments" = "lightgreen", "num_aa" = "lightblue"), labels = c("num_payments" = "Payments", "num_aa" = "Adverse Actions")) + xlab(label = "Year")
+
+qplot(data = melt(record_count_data, id='year' ), color=variable)
+```
+
+
+
+```{r Get_Lags}
+get_lag = function(yr, lag, pract_num, col_name, data){
+  # take matrix, return # lagged entries
+  dim(data[(data$PRACTNUM == pract_num) & 
+         (data$yr = yr - lag), col_name])[1]
+}
+
+payment_fields = unique(data[data$PAYMENT_DUMMY==1, "LICNFELD"])$LICNFELD
+data_trimmed = data[data$LICNFELD %in% payment_fields, ] 
+
+unique(data[data$PAYMENT_DUMMY==1, "WORKSTAT"])
+data_trimmed[, c("PRACTNUM", "ORIGYEAR", "PAYMENT_DUMMY")]
+
+
+
+length(as.vector((unique(data[data$PAYMENT_DUMMY==1, "LICNFELD"]))))
+```
+
+```{r PYRRLTNS}
+data %>% count(PYRRLTNS) %>% dplyr::arrange(desc(n))
+```
+
+```{r import_data, echo=FALSE}
+# keep at botton so doesn't re-run every time
+data = read_por("./NPDB2404.POR")
+# focusing modelling efforts on predicting the total for payments.
+reg_data = data[!is.na(data$PAYMENT) & data$PAYMENT > 0, ]
+
+```

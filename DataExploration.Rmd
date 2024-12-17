@@ -1,0 +1,103 @@
+---
+title: "DataExploration"
+author: "Will"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+Notes on Variables: ALEGATN1 - Specific Malpractice Act or Omission Code
+ALEGATN2 - First used 1/31/2004. Second A&O Code OUTCOME - Severity of
+Malpractice Injury - is available for REPTYPE P (payment reports
+beginning 1/31/2004) MALYEAR1 - Contains some errors (e.g., 3999).
+Beginning year of A&O MALYEAR2 - Contains some errors. End year of A&O.
+If same as MALYEAR1, may be blank PAYMENT - recorded as midpoint of an
+interval. Amt of payment that led to filing of medical malpractice
+report TOTALPMT - Generally the same as Payment. May be \> PAYMENT if
+other payments are made by the reporting entity for this practitioner in
+this case. NUMBPRSN - Number of practitioner involved in case. Note that
+payment refers to the specific practitioner. PAYTYPE - Judgement or
+settlement. Anything other than J is recommended to be considered a
+Settlement PYRRLTNS - How is paying entity related to the practitioner.
+Insurance Co, etc. PTTYPE - Inpatient, outpatient, both, unknown
+AACLASS1 - not relevant to payments BASISCD# - basis code for Adverse
+action AALENTYP - Indefinite, Permanent, or Specified penalty length
+AALENGTH - Length of Specified penalty AAEFYEAR - Effective Year of
+adverse action AASIGYR - Signature year of adverse action TYPE - Type of
+reporting entity PRACTNUM - For linking different records for the same
+practitioner ACCRRPTS - Total number of accredidation reports NPMALRPT -
+Total Malpractice payment reports for a practitioner NPLICRPT -
+Subject's Number of Clinical Privileges or Panel Member Reports
+submitted under Title IV NPPSMRPT - Subject's Number of Professional
+Society Membership Reports submitted under Title IV NPDEARPT - Subject's
+Number of DEA Reports submitted under Title IV NPEXCRPT - Subject's
+Number of Exclusion Reports submitted under Title IV and/or Section 1921
+NPGARPT - Subject's Number of Government Administrative Reports
+submitted under Section 1921. NPCTMRPT - Subject's Number of Contract
+Termination Reports submitted under Section 1921 FUNDPYMT - 0
+Malpractice Payment Made by an Insurance Company or Self-Insured Entity
+1 Malpractice Payment Made by a State Fund
+
+
+
+
+# change from haven type to factor
+
+# <https://stackoverflow.com/questions/67333840/error-in-usemethodrescale-no-applicable-method-for-rescale-applied-to-an>
+
+
+
+Insurance companies are the main insurer.
+
+```{r RECTYPE}
+data %>% count(RECTYPE) %>% dplyr::arrange(desc(n))
+data %>% dplyr::count(RECTYPE)
+data %>% group_by(RECTYPE) %>% summarise_at(vars(PAYMENT), list(mean_pmt = mean))
+summary(data[data$RECTYPE == "M","PAYMENT"])
+data[data$RECTYPE == "M" & is.na(data$PAYMENT), ]
+data[data$REPTYPE == 101, "RECTYPE"] %>% group_by(RECTYPE) %>% count()
+```
+
+The NA values are all for REPTYPE 101, and mostly in NY
+
+There are some NA values for PAYMENT in records of type "M". Since M is
+the old payment type, this should be an error.
+
+There are around 500k payments, with the rest being adverse actions
+
+```{r REPTYPE}
+data %>% count(REPTYPE) %>% dplyr::arrange(desc(n))
+```
+
+302 - State Licensure or Certification Action (Indiv, CAAR, 11/22/99 and
+later) is the most common report type. Payments under type 101 and 102
+are still substantial and there is considerable opportunity to model
+payments. Grouping by broader categories of report type (licensure,
+professional society, etc.) may yield useful insights, though the
+breakdown by RECTYPE with new and old combined may be the best route.
+
+```{r ORIGYEAR}
+orig_yr_cts = data %>% count(ORIGYEAR) %>% dplyr::arrange(desc(n))
+plot(x=orig_yr_cts$ORIGYEAR, y=orig_yr_cts$n)
+```
+
+There is an upwards trend in the mean and variance for the number of
+filed reports.
+
+```{r WORKSTAT}
+data %>% count(WORKSTAT) %>% arrange(desc(n))
+```
+
+```{r PAYMENT_REPORT_TYPES}
+data %>% group_by(PAYMENT_DUMMY, REPTYPE) %>% count() %>% filter(PAYMENT_DUMMY == 1)
+```
+
+REPTYPEs for Payments are all 101 and 102
+
+```{r PAYMENT_TREND}
+payment_trend = data %>% group_by(ORIGYEAR) %>% count(PAYMENT_DUMMY)
+head(payment_trend)
+ggplot(payment_trend, aes(ORIGYEAR, n, colour = as.factor(PAYMENT_DUMMY))) + geom_point()
+```
+
+Above, we see that payments are decreasing while non-payment reports are dramatically increasing. Narrowing in on payments, lets look for trends in the total payments.
+
