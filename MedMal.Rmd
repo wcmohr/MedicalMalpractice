@@ -2,11 +2,49 @@
 title: "LinReg_Project"
 author: "Will Mohr"
 date: "2024-11-12"
-output: pdf_document
-editor_options: 
-  markdown: 
+output:
+  word_document: default
+  pdf_document: default
+editor_options:
+  markdown:
     wrap: 72
 ---
+
+In this report I examine the data from the National Practitioner Data Bank, found at this url: https://www.npdb.hrsa.gov/resources/publicData.jsp
+
+The purpose of the report is to determine the extent to which several general characteristics of a case that an insurance company is exposed to can be used to predict the size of a payment in the case that a payment does occur.  This can combined with an additional estimate of the probability of a payment to help determine appropriate reserves.
+
+The final model predicts the log of the payment based on the practitioner's year of graduation from school, the year of the incident, the number of years between the occurrence of the incident and payment of the claim, the state of the practitioner, the licence field of the practitioner, the general and specific nature of the negligence that led to the claim, and the gender of the patient.  
+
+Initial transformations of the data involved trending the payments according to urban average cpi.  The cpi's were arithmetically averaged for each year according to the months for which data existed in the practitioner database and a factor was determined to on-level the payments to the 2024 October CPI.
+
+Investigation of the data revealed that some variables did not have entries for data before 1/30/2004, or around half the entries that involved payments. For a variable such as PTGENDGER (Patient Gender), these NA values were replaced with a factor such as the character "NA".  For numeric variables, such as PTAGE (Patient Age), I chose to exclude the variable from further analysis instead of removing data from before that cutoff date from the analysis.  This resulted in a feature category that in essence indicates the absense of knowledge about that variable but indicates that the date of the payment was prior to 1/30/2004.
+
+The modelling process went as follows.  First, since the outcome variable is monetary, a right-tailed distribution could be expected, which I verified first by plotting un-transformed payments compared to transformed payments.
+
+This plots revealed that the optimal transformation may involve a Box-Cox transformation somewhere between log (lambda=0) and the sixth root (lambda = 1/6), with hope remaining that a log transformation would suffice.
+
+I made some adjustments to the categorical predictor variables, combining categories with under 1000 occurrences into a miscellaneous category for all the categorical variables.  I also created a DEV_YEARS variable from differencing ORIGYEAR (year of payment) and MALYEAR1 (year of incident occurrence).  Since this is a post-hoc variable only known at time of payment, it may be of minimal use for reserving at the time of an incident if predictions of DEV_YEARS are unreliable.  However, it may be useful for updating reserves for cases from prior years. 
+
+I then looked at the numeric variables for correlations and non-linearity.  Most notably, there was some co-linearity between GRAD (Graduation Year) and MALYEAR1 (Year of Malpractice) as well as between MALYEAR1 and DEV_YEARS
+
+While I did not have much concerns about over fitting the data with all the categories for each variable having over 1000 observations, to increase the speed of model fitting and allow for a pure estimates of predictive power I split the dataset in half with equal allocations to train and test sets.  I utilized the fastDummies package to quickly generate dummy variables for all of my categorical variables.
+
+The naive approach to modelling resulted in a very poor r-squared of 0.1200508.
+
+I then attempted stepwise feature selection, but the processing requirements proved too much for my local machine and so I proceeded with "lasso" regularization.  This adds a penalty to the error function that is proportional to the number of parameters.  This is preferrable to "ridge" regression for feature selection, as ridge operates by shrinking coefficients to near zero but not quite zero.  I opted for the "1 se" aproach in selecting how severely to penalize the coefficients, as this reseulted in the removal of nearly 50 variables from 
+
+With this reduced feature set, I was able to then run backwards stepsise selection and determined that no additional parameters should be removed.
+
+The final adjusted r-Squared as calculated by 1- SSE/(n-k-1)/(SSTO/(n-1)) was around 32%, a significant improvement over the baseline model and perhaps indicating that there is a place for computational reserving as a complement to the estimations made by claims personnel.
+
+The ease of interpretability of the final model could potentially be improved by determining if further pruning of the feature space doesn't significantly impair the predictive value of the model.  Also, I could examine the STATE variable to determine if broader geographical categorization is sufficient (e.g. Pacific Northwest, New England, Southwest, etc.) Also, I would need to determine what are the baseline features included in the intercept of the model as well as document all the variables that were grouped under "miscelaneous" categories.
+
+Of note when interpreting the model is that since the outcome variable is log-transformed, the final predictor variables are multiplicative.  So taking the exponent, base e, of a coefficient determines the factor by which the predicted untransformed payment will change with all other variables constant.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
 
 ```{r LoadPackages}
 library(tidyverse)
@@ -15,8 +53,14 @@ library(haven)
 library(dplyr)
 library(fastDummies)
 library(car)
+library(MASS)
 ```
 
+```{r import_data, echo=FALSE}
+# keep at bottom so doesn't re-run every time
+data = read_por("./NPDB2404.POR")
+
+```
 General Notes This database is intended from the perspective of the
 practitioner. Unclear how separate records may refer to a single case.
 
@@ -70,7 +114,7 @@ rownames(CPI_YEARLY) = CPI_YEARLY$YEAR
 trend_payment = function(x){
   CPI_YEARLY[as.character(x[1]), "TREND_FACTOR"]*x[2]
 }
-CPI_YEARLY[as.character(1991), "TREND_FACTOR"]*x[2]
+
 
 # VAR: PAYMENT_TRENDED
 reg_data$PAYMENT_TRENDED = apply(reg_data[c("ORIGYEAR","PAYMENT")],
@@ -111,29 +155,37 @@ cor(reg_data %>% group_by(ORIGYEAR) %>% summarise(mean = mean(PAYMENT_TRENDED)) 
 # there is a positive correlation between year and mean trended payment
 
 pairs(reg_data[c("ORIGYEAR","PAYMENT_TRENDED")])
-
-
-?pairs
 ```
 
 ```{r feature_engineering}
 # VAR: PAYMENT_TRENDED
-
 reg_vars = c("PAYMENT_TRENDED")
 
 # VAR: WORKSTATE
-reg_data[reg_data$LICNSTAT == "" & reg_data$HOMESTAT == "" & reg_data$WORKSTAT == "", ]
+reg_data$WORKSTAT = as.character(reg_data$WORKSTAT)
+reg_data$HOMESTAT = as.character(reg_data$HOMESTAT)
+reg_data$LICNSTAT = as.character(reg_data$LICNSTAT)
+
 reg_data[reg_data$WORKSTAT == "", "WORKSTAT"] = reg_data[reg_data$WORKSTAT == "","HOMESTAT"]
 reg_data[reg_data$WORKSTAT== "", "WORKSTAT"] = reg_data[reg_data$WORKSTAT == "","LICNSTAT"]
+
+summary_WORKSTAT = as.data.frame(reg_data %>% group_by(WORKSTAT) %>% summarise(n=n()))
+misc_WORKSTAT = summary_WORKSTAT[summary_WORKSTAT$n<6000, "WORKSTAT"]
+
+reg_data$WORKSTAT = as.character(reg_data$WORKSTAT)
+reg_data[reg_data$WORKSTAT %in% misc_WORKSTAT ,"WORKSTAT"] = "Other"
+reg_data$WORKSTAT = as.factor(reg_data$WORKSTAT)
 reg_data = reg_data[reg_data$WORKSTAT != "", ]
 reg_vars = c(reg_vars,"WORKSTAT")
 
-# VAR: LICNFELD
+# VAR: LICNFELD -- all have n>1000?
 licnfeld_df = as.data.frame(reg_data %>% group_by(LICNFELD) %>% summarise(
 n = n(), mean = mean(PAYMENT_TRENDED)) %>% arrange(desc(n)))
-licnfeld_df$LICNFELD = as.character(licnfeld_df$LICNFELD)
+licnfeld_df$LICNFELD = as.integer(licnfeld_df$LICNFELD)
+if(min(licnfeld_df$n)<1000){
 misc_licnfeld = licnfeld_df[licnfeld_df$n < 1000,"LICNFELD"]
 reg_data[reg_data$LICNFELD %in% misc_licnfeld, "LICNFELD"] = 99999
+}
 reg_data$LICNFELD = as.factor(reg_data$LICNFELD)
 reg_vars = c(unique(reg_vars), "LICNFELD")
 
@@ -173,19 +225,21 @@ reg_vars = c(unique(reg_vars),"ALEGATN1")
 # VAR: DEV_YEARS
 reg_data$DEV_YEARS = reg_data$ORIGYEAR - reg_data$MALYEAR1
 reg_data$DEV_YEARS = as.numeric(reg_data$DEV_YEARS)
-reg_vars = c(unique(reg_vars),"DEV_YEARS")
-reg_vars = c(unique(reg_vars),"MALYEAR1")
+reg_vars = c(unique(reg_vars), "DEV_YEARS")
+reg_vars = c(unique(reg_vars), "MALYEAR1")
 
 # PAYNUMBR may incur data "leakage"
 
 # VAR: PTGENDER
 reg_data %>% group_by(PTGENDER) %>% summarise(mean(PAYMENT), n=n())
 reg_data[reg_data$PTGENDER == "", "PTGENDER"] = "NA"
+reg_data$PTGENDER = as.factor(reg_data$PTGENDER)
 reg_vars = c(unique(reg_vars), "PTGENDER")
 
 # VAR: PTTYPE
 reg_data %>% group_by(PTTYPE) %>% summarise(mean(PAYMENT), n=n())
 reg_data[reg_data$PTTYPE == "" ,"PTTYPE"] = "NA"
+reg_data$PTTYPE = as.factor(reg_data$PTTYPE)
 reg_vars = c(unique(reg_vars), "PTTYPE")
 
 # VAR: OUTCOME
@@ -196,7 +250,7 @@ reg_vars = c(unique(reg_vars),"OUTCOME")
 
 # VAR: PTAGE 
 # Patient Age is missing in half the records
-sum(is.na(reg_data$PTAGE))
+#sum(is.na(reg_data$PTAGE))
 ```
 
 ```{r formulate_problem}
@@ -204,22 +258,102 @@ reg_vars = unique(c(reg_vars, "PAYMENT_TRENDED"))
 reg_data[, reg_vars]
 reg_data[, reg_vars]
 vars_matrix = fastDummies::dummy_cols(reg_data[, reg_vars])
-numeric_cols = vars_matrix %>% select(where(is.double))
-reg_data %>% group_by(ALEGATN1) %>% summarise(n=n())
+numeric_cols = vars_matrix %>% dplyr::select(where(is_double))
 
-scatterplotMatrix(numeric_cols[seq(1,dim(numeric_cols)[1],100),])
+scatterplotMatrix(numeric_cols[seq(1,dim(numeric_cols)[1],100),],cex = .5)
 ```
+
 ```{r first_model}
-attach(vars_matrix)
-lm(data = vars_matrix, PAYMENT_TRENDED ~ .)
+# collecting dummy_vars for mental reference and removal from design matrix
+train_rows = seq(1,dim(vars_matrix)[1],2)
+test_rows = seq(2,dim(vars_matrix)[1],2)
+train_rows
+
+dummy_vars = c("WORKSTAT", "LICNFELD", "ALGNNATR", "PTGENDER", "PTTYPE", "OUTCOME")
+
+factor_cols = names(vars_matrix %>% dplyr::select(where(is.factor)))
+model_df = vars_matrix[train_rows,!names(vars_matrix) %in% factor_cols]
+# Specify initial model
+mod1 = lm(data = model_df, formula = PAYMENT_TRENDED ~ .)
+r_2 = summary(mod1)$adj.r.squared
+# Box-Cox transformation
+boxcox(mod1, plotit=TRUE)
+```
+The adjusted r-squared of the un-transformed, full model is very poor at only 0.1200508.
+
+Above, we see that the optimal model has an approximately log-transformed response.  This is expected for right-skewed data often seen with monetary outcomes. For ease of interpretability, this is the chosen model moving foreward.  
+
+```{r boxcox_model}
+# replace outcome var with log(var)
+model_df$PAYMENT_TRENDED_LOG = log(model_df$PAYMENT_TRENDED)
+vars_matrix$PAYMENT_TRENDED_LOG = log(vars_matrix$PAYMENT_TRENDED)
+
+model_df = model_df[,!names(model_df) %in% c("PAYMENT_TRENDED")]
+
+bc_model = lm(PAYMENT_TRENDED_LOG~., data = model_df)
+summary(bc_model)
+
+# bc_model.aic = step(bc_model, direction = "backward")
 ```
 
+A very small p-value indicates that there there is statistical significance to the model.
 
-```{r import_data, echo=FALSE}
-# keep at bottom so doesn't re-run every time
-data = read_por("./NPDB2404.POR")
+```{r feature_selection}
+
+library(glmnet)
+library(mosaic)
+X = data.matrix(model_df[,!names(model_df) %in% "PAYMENT_TRENDED_LOG"])
+y = model_df[,"PAYMENT_TRENDED_LOG"]$PAYMENT_TRENDED_LOG
+  
+cv_model = cv.glmnet(scale(X), y, alpha = 1)
+selected_lambda = cv_model$lambda.1se
+plot(cv_model) 
+# step(bc_model,direction = "backward")
+glm_reduced = glmnet(X, y, alpha = 1, lambda = selected_lambda)
+glm_coef = coef(glm_reduced)@Dimnames[[1]][which(coef(glm_reduced)!=0)]
+length(glm_coef)
+```
+```{r model_regularized}
+predictors_reg =  glm_coef[2:length(glm_coef)]
+model_df_reg = model_df[,c(names(model_df)[names(model_df) %in% predictors_reg], "PAYMENT_TRENDED_LOG")]
+model_reg = lm(formula = PAYMENT_TRENDED_LOG ~ ., data=model_df_reg)
+summary(model_reg)
+# step(model_reg, direction = "backward")
+```
+Backwards stepwise regression does not result in a reduced AIC.
+
+Pairwise residual analysis
+```{r residual_analysis_wrt_time}
+residuals = model_reg$residuals
+ggplot(mapping = aes(x=seq(1,length(residuals),1), y = residuals)) + geom_point(alpha=.1)
+model_df_reg
+ggplot(mapping = aes(x=model_df_reg$GRAD, y = residuals)) + geom_point(alpha=.01)
+ggplot(mapping = aes(x=model_df_reg$DEV_YEARS, y = residuals)) + geom_point(alpha=.01)
+ggplot(mapping = aes(x=model_df_reg$DEV_YEARS)) + geom_histogram()
+
+ggplot(mapping = aes(x=model_df_reg$MALYEAR1, y = residuals)) + geom_point(alpha=.01)
 
 ```
+From the above, we can see that there is no obvious non-linearity in the residuals with respect to their order in the database.  From this view there may be a slight increase in the left-skew of the residuals over time.
+
+There also is no clear non-linearity as a function of development years. The apparent heteroskedasticity reflects the histogram of the distribution by development years and so is not of immediate concern.
+
+```{r eval_model_test_set}
+test_df = vars_matrix[test_rows, names(model_df_reg)]
+names(test_df)
+
+y_hat = predict.lm(object = model_reg,newdata = test_df)
+y_true = test_df$PAYMENT_TRENDED_LOG 
+
+
+sse = sum((y_hat-y_true)^2)
+ssto = sum((y_true-mean(y_true))^2)
+n = dim(test_df)[1]
+p = length(model_reg$coefficients)
+r_2_adj = 1 - (sse/(n-p))/(ssto/(n-1))
+r_2_adj
+```
+From the above, we see that the significantly trimmed model is able to still explain ~32.8 percent of the variance  in logged payments on an adjusted basis.
 
 
 
